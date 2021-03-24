@@ -1,0 +1,329 @@
+# First we install the necessary packages
+library(tidyverse)
+library(rvest)
+library(xml2)
+# Get the url
+url1 <- "https://www.nrcs.usda.gov/wps/portal/nrcs/detail/national/technical/nra/nri/results/?cid=nrcs143_014083"
+# We need to get it from an html file
+pesticides <- url1 %>%
+  read_html %>%
+  html_nodes("table") %>%
+  # The website recognizes it as the 21st table
+  .[21] %>%
+  # Now we are making R read it as a tibble
+  html_table() %>%
+  .[[1]]
+# Let's see what it looks like so far
+head(pesticides)
+# This is good. Let's make it a tibble so that we can change it around
+pesticides <- as_tibble(pesticides)
+# Looking good, we have doubles and characters correctly identified, however, the first column is named
+# `Pesticide (active ingredient name)`. This has multiple spaces which means that we can't change the name or  
+# refer to the column.
+pesticides
+# Let's fix that by replacing all spaces with periods
+names(pesticides) <- str_replace_all(names(pesticides), c(" " = "." , "," = "" ))
+# Now we can rename it into something more standard
+pesticides <- rename(pesticides, Pesticide = `Pesticide.(active.ingredient.name)`)
+# Ok, this looks good to go
+class(pesticides)
+str(pesticides)
+pesticides
+
+# Now we can get to work on another table
+url2 <- "https://www.nrcs.usda.gov/wps/portal/nrcs/detail/national/technical/nra/nri/results/?cid=nrcs143_014087"
+# Now we have some problems after getting the table from the website. This table is organized completely
+# differently and is actually 8 tables with different titles at once. We only want to know about the pesticide
+# water leaching index. This will tell us the proportion out of total pollution that each crop gives us from
+# the pesticides used on it.
+leaching <- url2 %>%
+  read_html(stringsAsFactors = FALSE) %>%
+  html_nodes("table") %>%
+  .[21] %>%
+  html_table() %>%
+  .[[1]]
+# The title comes after the column names, so we have to remove the first line
+leaching <- leaching[-1,]
+# Now lets give each column a name
+names(leaching) <- c("Produce","1960-65",	"1966-71",	"1972-77",	"1978-83",	"1984-90",	"1991-97")
+# In order to only take on graph, all we have to do is create a header that contains the last line of the table
+# then make the header be the entire thing. If we wanted to take the second or third table we would then use the
+# tail() function to only take the last table on our header.
+leaching <- head(leaching, n = 13L)
+# Now let's make it a tibble to be able to maneuver it more easily
+leaching <- as_tibble(leaching)
+# Unfortunately, the percentages given are unusable because they are not numbers. Let's make them numeric
+# and remove the % signs 
+leaching$`1960-65` <- as.numeric(gsub("[\\%,]", "", leaching$`1960-65`))
+leaching$`1966-71` <- as.numeric(gsub("[\\%,]", "", leaching$`1966-71`))
+leaching$`1972-77` <- as.numeric(gsub("[\\%,]", "", leaching$`1972-77`))
+leaching$`1978-83` <- as.numeric(gsub("[\\%,]", "", leaching$`1978-83`))
+leaching$`1984-90` <- as.numeric(gsub("[\\%,]", "", leaching$`1984-90`))
+leaching$`1991-97` <- as.numeric(gsub("[\\%,]", "", leaching$`1991-97`))
+# The 13th row is unnecessary because it only contain the total percent (100)
+leaching <- leaching[-13,]
+# Now that everything is numeric, let's add a new column with the mean of everything. However, currently the years
+# are in columns and the produce is in rows. In order to take the mean we'll have to reverse that. The code
+# below is a manner of transposing that is easier than pivot_longer/wider when many variables have to be reversed
+df <- leaching %>% 
+  rownames_to_column() %>% 
+  gather(variable, value, -Produce) %>% 
+  spread(Produce, value)
+# Let's rename "variable" as year, to keep things organized
+df <- rename(df, year = variable)
+# Now let's make the columns numeric so we can take the means
+for (i in 2:13){
+  df[,i] <- sapply( df[,i], as.numeric)
+}
+# When we use the mean function we get an error, so we'll take the means using a double for-loop and ignore the
+# 7th row so that we can use it later without changing the mean
+sum <- 0
+for (i in 2:13){
+  for (j in 1:6){
+    sum <- df[j,i] + sum
+  }
+  df[i] <- sum/6
+  sum <- 0
+}
+# Looking good. However, the final amalgam of tables uses the product as an observation. Thus, we have to 
+# switch it back
+df2 <- df %>% 
+  rownames_to_column() %>% 
+  gather(variable, value, -year) %>% 
+  spread(year, value)
+# Let's make it numeric again
+for (i in 2:8){
+  df2[,i] <- sapply(df2[,i], as.numeric)
+}
+# Now let's call the final row "Mean" and get rid of the 8th row which is rowname
+df2 <- rename(df2, Mean = rowname)
+df2 <- df2[-8,]
+# We now have a table completely populated by means. Lets replace all values other than the mean with what
+# they originally had
+for (i in 1:7){
+  for (j in 1:12){
+    df2[j,i] <- leaching[j,i]
+  }
+}
+# Now we call it leaching
+leaching <- df2
+# Now we rename variable as Product
+leaching <- rename(leaching, Product = variable)
+# This is not tidy because observations should not be in columns, but it has to be this way for us to be able to
+# use the table later on. If we wanted to tidy it up it would be pretty simple as we would only need to switch
+# the rows and columns again
+leaching
+# Now, we need to work with a space delimited text that doesn't use consistent spacing (read_tsv does not work 
+# because it reads the whole thing as only having one column)
+# First, we will need to skip 348 lines
+peanuts <- read.table("https://downloads.usda.library.cornell.edu/usda-esmis/files/t722h8817/2v23vw89h/8w32r8224/AgChemUsDistRate-12-23-2005.txt",
+                      skip = 348, fill = TRUE)
+# Now we have a mess
+peanuts
+# Let's take the first 32 rows (in an alternative manner to that which we used for the previous table)
+peanuts <- peanuts[1:32,]
+# Let's make it a tibble
+peanuts <- as_tibble(peanuts)
+# The second column only contains colons and words with multiple spaces. Let's get rid of it
+peanuts <- peanuts[,-2]
+# Now we should rename a few pesticides that will be kept in the final table
+# to keep them unique and within standards
+peanuts[1,1] <- "2,4-DB"
+peanuts[10,1] <- "Imazapic_amm."
+# We have two extra columns that were created because of pesticides with long names, this will transition
+# everything to where it belongs
+for (i in 4:8){
+  peanuts[1,i-2] <- peanuts[1,i]
+}
+for (i in 4:8){
+  peanuts[8,i-2] <- peanuts[8,i]
+}
+for (i in 3:7){
+  peanuts[10,i-1] <- peanuts[10,i]
+}
+# Now we can remove and extra column and remove rows that contain nothing but the type of pesticide 
+# (e.g.: herbicides or fungicides)
+peanuts <- peanuts[-c(16,17,25,26),-c(7)]
+# Let's repurpose the 7th column and make it into our product's name
+peanuts[1:28,7] = "Peanuts"
+# This will change names to something we can use
+peanuts <- rename(peanuts, Pesticide = V1, Tenth_Percentile = V3, Median = V4, Ninetieth_Percentile = V5, Mean = V6, cv = V7, Product = V9)
+# I want the product to appear first
+peanuts <- select(peanuts, Product, Pesticide, Tenth_Percentile, Median, Ninetieth_Percentile, Mean, cv)
+# Make the numbers numeric
+for (i in 3:7){
+  peanuts[,i] <- sapply(peanuts[,i], as.numeric)
+}
+peanuts
+# We need to skip 502 lines this time. Space delimited txt
+soybeans <- read.table("https://downloads.usda.library.cornell.edu/usda-esmis/files/t722h8817/2v23vw89h/8w32r8224/AgChemUsDistRate-12-23-2005.txt",
+                       skip = 502, fill = TRUE)
+# This table is 23 lines long
+soybeans <- soybeans[1:23,]
+# Make it a tibble
+soybeans <- as_tibble(soybeans)
+# remove second column
+soybeans <- soybeans[,-2]
+# Make row 11 fit naming conventions
+soybeans[11,1] <- "Glyphosate_iso._salt"
+# Fix the table so that we can remove the last two columns
+for (i in 4:8){
+  soybeans[2,i-2] <- soybeans[2,i]
+}
+for (i in 4:8){
+  soybeans[11,i-2] <- soybeans[11,i]
+}
+# Remove unneeded column and rows that only contain headers rather than pesticides
+soybeans <- soybeans[-c(20,21),-c(7)]
+# Repurpose final column into product
+soybeans[1:21,7] = "Soybeans"
+# Fix up some names
+soybeans <- rename(soybeans, Pesticide = V1, Tenth_Percentile = V3, Median = V4, Ninetieth_Percentile = V5, Mean = V6, cv = V7, Product = V9)
+# Put product first
+soybeans <- select(soybeans, Product, Pesticide, Tenth_Percentile, Median, Ninetieth_Percentile, Mean, cv)
+# Make the numbers numeric
+for (i in 3:7){
+  soybeans[,i] <- sapply(soybeans[,i], as.numeric)
+}
+soybeans
+# Skip 721 lines. Space delimited txt
+wheat <- read.table("https://downloads.usda.library.cornell.edu/usda-esmis/files/t722h8817/2v23vw89h/8w32r8224/AgChemUsDistRate-12-23-2005.txt",
+                    skip = 721, fill = TRUE)
+# We only need the first 22 rows
+wheat <- wheat[1:22,]
+# Make it a tibble
+wheat <- as_tibble(wheat)
+# Remove second row
+wheat <- wheat[-2]
+# Now we should rename a few pesticides that will be kept in the final table
+# to keep them unique and within standards
+wheat[2,1] <- "2,4-DP"
+wheat[12,1] <- "Fluroxypyr_1-methylh"
+wheat[15,1] <- "MCPA,_dimethyl. salt"
+# There are lots of columns to fix for this one. We'll make the final two columns unnecessary so we can
+# remove/change them
+for (i in 4:8){
+  wheat[3,i-2] <- wheat[3,i]
+}
+for (i in 4:8){
+  wheat[2,i-2] <- wheat[2,i]
+}
+for (i in 3:7){
+  wheat[5,i-1] <- wheat[5,i]
+}
+for (i in 3:7){
+  wheat[12,i-1] <- wheat[12,i]
+}
+for (i in 4:8){
+  wheat[13,i-2] <- wheat[13,i]
+}
+for (i in 4:8){
+  wheat[15,i-2] <- wheat[15,i]
+}
+# Remove 7th column and unnecessary rows
+wheat <- wheat[-c(19,20),-c(7)]
+# Fill final column with wheat
+wheat[1:20,7] = "Wheat"
+# Make all columns have good names
+wheat <- rename(wheat, Pesticide = V1, Tenth_Percentile = V3, Median = V4, Ninetieth_Percentile = V5, Mean = V6, cv = V7, Product = V9)
+# Put the product first
+wheat <- select(wheat, Product, Pesticide, Tenth_Percentile, Median, Ninetieth_Percentile, Mean, cv)
+# Make the numbers numeric
+for (i in 3:7){
+  wheat[,i] <- sapply(wheat[,i], as.numeric)
+}
+wheat
+# Skip 1106 rows. Space delimited txt
+asparagus <- read.table("https://downloads.usda.library.cornell.edu/usda-esmis/files/t722h8817/2v23vw89h/8w32r8224/AgChemUsDistRate-12-23-2005.txt",
+                        skip = 1106, fill = TRUE)
+# Use only first 15 rows
+asparagus <- asparagus[1:15,]
+# Make it a tibble
+asparagus <- as_tibble(asparagus)
+# Remove 2nd column
+asparagus <- asparagus[,-2]
+# Make last two column unnecessary by transfering the important information in them
+for (i in 4:8){
+  asparagus[2,i-2] <- asparagus[2,i]
+}
+# Remove unnecessary rows and columns
+asparagus <- asparagus[-c(6,7,12,13),-c(7)]
+# Fill final column with the product
+asparagus[1:11,7] = "Asparagus"
+# Give good names to each column
+asparagus <- rename(asparagus, Pesticide = V1, Tenth_Percentile = V3, Median = V4, Ninetieth_Percentile = V5, Mean = V6, cv = V7, Product = V9)
+# Put asparagus first
+asparagus <- select(asparagus, Product, Pesticide, Tenth_Percentile, Median, Ninetieth_Percentile, Mean, cv)
+# Make the numbers numeric
+for (i in 3:7){
+  asparagus[,i] <- sapply(asparagus[,i], as.numeric)
+}
+asparagus
+# Skip 1805 lines. space delimited txt
+corn <- read.table("https://downloads.usda.library.cornell.edu/usda-esmis/files/t722h8817/2v23vw89h/8w32r8224/AgChemUsDistRate-12-23-2005.txt",
+                   skip = 1805, fill = TRUE)
+# Use 23 rows
+corn <- corn[1:23,]
+# Make it a tibble
+corn <- as_tibble(corn)
+# Remove rows with colons
+corn <- corn[,-2]
+# Transfer important data in 7th and 8th columns back to another column so that we can delete them
+for (i in 4:8){
+  corn[4,i-2] <- corn[4,i]
+}
+# Remove 7th column and extraneous rows
+corn <- corn[-c(7,8,20,21),-c(7)]
+# Fill final column with the product
+corn[1:19,7] = "Corn"
+# Give columns good names
+corn <- rename(corn, Pesticide = V1, Tenth_Percentile = V3, Median = V4, Ninetieth_Percentile = V5, Mean = V6, cv = V7, Product = V9)
+# Put corn first to make it look nice
+corn <- select(corn, Product, Pesticide, Tenth_Percentile, Median, Ninetieth_Percentile, Mean, cv)
+# Make numbers numeric
+for (i in 3:7){
+  corn[,i] <- sapply(corn[,i], as.numeric)
+}
+corn
+# Now we take out what we don't need and only keep means, products, and pesticides
+corn <- select(corn, Product, Pesticide, Mean)
+asparagus <- select(asparagus, Product, Pesticide, Mean)
+wheat <- select(wheat, Product, Pesticide, Mean)
+soybeans <- select(soybeans, Product, Pesticide, Mean)
+peanuts <- select(peanuts, Product, Pesticide, Mean)
+leaching <- select(leaching, Product, Mean)
+pesticides <- select(pesticides, Pesticide, Humans)
+
+# Leaching, pesticides, and the different crops have means that signify different things. Let's rename them to
+# make it clearer. Pounds_Per_Acre refers to how many pounds of that pesticide are used on a crop per acre
+# planted
+corn <- rename(corn, Pounds_Per_Acre = Mean)
+asparagus <- rename(asparagus, Pounds_Per_Acre = Mean)
+wheat <- rename(wheat, Pounds_Per_Acre = Mean)
+soybeans <- rename(soybeans, Pounds_Per_Acre = Mean)
+peanuts <- rename(peanuts, Pounds_Per_Acre = Mean)
+# Percent_Leaching_Per_Crop refers to how much each crop contributes to water pollution through
+# the leaching of pesticides into drinking water
+leaching <- rename(leaching, Percent_Leaching_Per_Crop = Mean)
+# PPB_Danger_Level refers to how many parts per billion of water have to be composed of a specified 
+# pesticide for the water to be deemed dangerous to drink
+pesticides <- rename(pesticides, PPB_Danger_Level = Humans)
+# Let's make the final table
+# First, we'll combine the crops with full_join so that we don't miss out on any chemicals
+pesticide_danger_by_crop <- corn %>%
+  full_join(asparagus)
+pesticide_danger_by_crop <- pesticide_danger_by_crop %>%
+  full_join(wheat)
+pesticide_danger_by_crop <- pesticide_danger_by_crop %>%
+  full_join(soybeans)
+pesticide_danger_by_crop <- pesticide_danger_by_crop %>%
+  full_join(peanuts)
+# Now we can combine the with leaching caused by each crop. We'll do it by Product.
+pesticide_danger_by_crop <- pesticide_danger_by_crop %>%
+  full_join(leaching, by = "Product")
+# Finally, we combine it all with the table pesticides. We'll do it by Pesticide. We do a left join here because
+# if a pesticide we don't already have is mentioned we will gain very little from knowing its result
+# since we won't know of a crop that uses it.
+pesticide_danger_by_crop <- pesticide_danger_by_crop %>%
+  left_join(pesticides, by = "Pesticide")
+View(pesticide_danger_by_crop)
